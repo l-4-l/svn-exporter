@@ -944,7 +944,7 @@ class Repository {
             await this.setDirectory(d);
         }
     }
-
+/*
     discoverBranchTag(pathName) {
         const parts = pathName.split('/');
 
@@ -957,7 +957,30 @@ class Repository {
         if (parts[0] === 'tags') {
             this.tags.add(parts.slice(0, 2).join('/'));
         }
+    } */
+
+discoverBranchTag(pathName) {
+    const parts = normalizeRepoPath(pathName).split('/');
+
+    for (let i = 0; i < parts.length - 1; i++) {
+        if (parts[i] === 'branches') {
+            if (i + 1 < parts.length) {
+                this.branches.add(
+                    parts.slice(0, i + 2).join('/')
+                );
+            }
+        }
+
+        if (parts[i] === 'tags') {
+            if (i + 1 < parts.length) {
+                this.tags.add(
+                    parts.slice(0, i + 2).join('/')
+                );
+            }
+        }
     }
+}
+    
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1443,32 +1466,132 @@ function directChildrenUnder(root, paths) {
         }
     }
 
-    return [...result].sort(
-        (a, b) =>
-            a.localeCompare(b, undefined, {
-                numeric: true
-            })
+    return [...result].sort((a, b) =>
+        a.localeCompare(b, undefined, {
+            numeric: true
+        })
     );
 }
 
-function listBranches(repo, prefix) {
-    return directChildrenUnder(
-        prefix,
-        [...repo.nodes.keys()]
-    ).filter(p => {
-        const node = repo.nodes.get(p);
-        return node && node.kind === 'dir';
-    });
+/*
+ * Find paths of the form:
+ *
+ *   PROJECT/branches/BRANCH
+ *   PROJECT/tags/TAG
+ *
+ * The PROJECT part is not assumed to be known in advance.
+ */
+function discoverRoots(repo) {
+    const paths = [...repo.nodes.keys()];
+
+    const branchesRoots = new Set();
+    const tagsRoots = new Set();
+
+    for (const p of paths) {
+        const parts = p.split('/');
+
+        /*
+         * Need at least:
+         *
+         *   PROJECT / branches / NAME
+         *
+         * or
+         *
+         *   PROJECT / tags / NAME
+         */
+        if (parts.length < 3) {
+            continue;
+        }
+
+        for (let i = 0; i < parts.length - 1; i++) {
+            if (parts[i] === 'branches') {
+                branchesRoots.add(
+                    parts.slice(0, i + 1).join('/')
+                );
+            }
+
+            if (parts[i] === 'tags') {
+                tagsRoots.add(
+                    parts.slice(0, i + 1).join('/')
+                );
+            }
+        }
+    }
+
+    return {
+        branchesRoots: [...branchesRoots].sort(),
+        tagsRoots: [...tagsRoots].sort()
+    };
 }
 
-function listTags(repo, prefix) {
-    return directChildrenUnder(
-        prefix,
-        [...repo.nodes.keys()]
-    ).filter(p => {
-        const node = repo.nodes.get(p);
-        return node && node.kind === 'dir';
-    });
+function listBranches(repo, prefix = null) {
+    if (prefix) {
+        return directChildrenUnder(
+            prefix,
+            [...repo.nodes.keys()]
+        ).filter(p => {
+            const node = repo.nodes.get(p);
+            return node && node.kind === 'dir';
+        });
+    }
+
+    const { branchesRoots } = discoverRoots(repo);
+
+    const result = new Set();
+
+    for (const root of branchesRoots) {
+        for (const branch of directChildrenUnder(
+            root,
+            [...repo.nodes.keys()]
+        )) {
+            const node = repo.nodes.get(branch);
+
+            if (node && node.kind === 'dir') {
+                result.add(branch);
+            }
+        }
+    }
+
+    return [...result].sort((a, b) =>
+        a.localeCompare(b, undefined, {
+            numeric: true
+        })
+    );
+}
+
+function listTags(repo, prefix = null) {
+    if (prefix) {
+        return directChildrenUnder(
+            prefix,
+            [...repo.nodes.keys()]
+        ).filter(p => {
+            const node = repo.nodes.get(p);
+            return node && node.kind === 'dir';
+        });
+    }
+
+    const { tagsRoots } = discoverRoots(repo);
+
+    const result = new Set();
+
+    for (const root of tagsRoots) {
+        for (const tag of directChildrenUnder(
+            root,
+            [...repo.nodes.keys()]
+        )) {
+            const node = repo.nodes.get(tag);
+
+            if (node && node.kind === 'dir') {
+                result.add(tag);
+            }
+        }
+    }
+
+    return [...result].sort((a, b) =>
+        a.localeCompare(b, undefined, {
+            numeric: true
+        })
+    );
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1776,8 +1899,8 @@ function parseArgs(argv) {
 
     const options = {
         revision: null,
-        branchesPrefix: 'branches',
-        tagsPrefix: 'tags',
+        branchesPrefix: null,
+        tagsPrefix: null,
         progress: false,
         progressEvery: 100
     };

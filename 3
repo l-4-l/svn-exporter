@@ -1,0 +1,870 @@
+function discoverLayout(repo) {
+    const paths =
+        [...repo.nodes.keys()];
+
+    const branchesRoots =
+        new Set();
+
+    const tagsRoots =
+        new Set();
+
+    for (const p of paths) {
+        const parts =
+            p.split('/');
+
+        for (
+            let i = 0;
+            i < parts.length;
+            i++
+        ) {
+            if (
+                parts[i] ===
+                'branches'
+            ) {
+                branchesRoots.add(
+                    parts
+                        .slice(0, i + 1)
+                        .join('/')
+                );
+            }
+
+            if (
+                parts[i] ===
+                'tags'
+            ) {
+                tagsRoots.add(
+                    parts
+                        .slice(0, i + 1)
+                        .join('/')
+                );
+            }
+        }
+    }
+
+    return {
+        branchesRoots:
+            [...branchesRoots].sort(),
+        tagsRoots:
+            [...tagsRoots].sort()
+    };
+}
+
+function directDirectoryChildren(
+    repo,
+    root
+) {
+    root =
+        normalizeRepoPath(
+            root
+        );
+
+    const result =
+        new Set();
+
+    for (
+        const p of repo.nodes.keys()
+    ) {
+        if (
+            p === root ||
+            !isDescendantOrSelf(
+                p,
+                root
+            )
+        ) {
+            continue;
+        }
+
+        const relative =
+            relativeRepoPath(
+                p,
+                root
+            );
+
+        const slash =
+            relative.indexOf('/');
+
+        const child =
+            slash < 0
+                ? relative
+                : relative.substring(
+                      0,
+                      slash
+                  );
+
+        if (!child) {
+            continue;
+        }
+
+        const childPath =
+            `${root}/${child}`;
+
+        const node =
+            repo.nodes.get(
+                childPath
+            );
+
+        if (
+            node &&
+            node.kind === 'dir'
+        ) {
+            result.add(
+                childPath
+            );
+        }
+    }
+
+    return [...result].sort(
+        (a, b) =>
+            a.localeCompare(
+                b,
+                undefined,
+                {
+                    numeric: true
+                }
+            )
+    );
+}
+
+function listBranches(
+    repo
+) {
+    const {
+        branchesRoots
+    } = discoverLayout(repo);
+
+    const result =
+        new Set();
+
+    for (
+        const root of branchesRoots
+    ) {
+        for (
+            const branch of
+                directDirectoryChildren(
+                    repo,
+                    root
+                )
+        ) {
+            result.add(
+                branch
+            );
+        }
+    }
+
+    return [...result].sort();
+}
+
+function listTags(
+    repo
+) {
+    const {
+        tagsRoots
+    } = discoverLayout(repo);
+
+    const result =
+        new Set();
+
+    for (
+        const root of tagsRoots
+    ) {
+        for (
+            const tag of
+                directDirectoryChildren(
+                    repo,
+                    root
+                )
+        ) {
+            result.add(
+                tag
+            );
+        }
+    }
+
+    return [...result].sort();
+}
+
+/* ------------------------------------------------------------------------- */
+/* Repository path resolution                                                 */
+/* ------------------------------------------------------------------------- */
+
+function resolveRepositoryPath(
+    repo,
+    requested
+) {
+    requested =
+        normalizeRepoPath(
+            requested
+        );
+
+    /*
+     * Exact path first.
+     */
+    if (
+        repo.nodes.has(
+            requested
+        )
+    ) {
+        return requested;
+    }
+
+    /*
+     * If the user supplied branches/foo or tags/foo,
+     * try PROJECTNAME/branches/foo and PROJECTNAME/tags/foo.
+     */
+    const candidates = [];
+
+    if (
+        requested === 'branches' ||
+        requested.startsWith(
+            'branches/'
+        )
+    ) {
+        for (
+            const root of
+                discoverLayout(
+                    repo
+                ).branchesRoots
+        ) {
+            const project =
+                parentPath(root);
+
+            candidates.push(
+                project
+                    ? `${project}/${requested}`
+                    : requested
+            );
+        }
+    }
+
+    if (
+        requested === 'tags' ||
+        requested.startsWith(
+            'tags/'
+        )
+    ) {
+        for (
+            const root of
+                discoverLayout(
+                    repo
+                ).tagsRoots
+        ) {
+            const project =
+                parentPath(root);
+
+            candidates.push(
+                project
+                    ? `${project}/${requested}`
+                    : requested
+            );
+        }
+    }
+
+    for (
+        const candidate of candidates
+    ) {
+        if (
+            repo.nodes.has(
+                candidate
+            )
+        ) {
+            return candidate;
+        }
+    }
+
+    /*
+     * If there is exactly one project root, also try:
+     *
+     *   PROJECTNAME/<requested>
+     */
+    const projectRoots =
+        new Set();
+
+    for (
+        const root of
+            discoverLayout(repo)
+                .branchesRoots
+    ) {
+        projectRoots.add(
+            parentPath(root)
+        );
+    }
+
+    for (
+        const root of
+            discoverLayout(repo)
+                .tagsRoots
+    ) {
+        projectRoots.add(
+            parentPath(root)
+        );
+    }
+
+    if (
+        projectRoots.size === 1
+    ) {
+        const project =
+            [...projectRoots][0];
+
+        const candidate =
+            `${project}/${requested}`;
+
+        if (
+            repo.nodes.has(
+                candidate
+            )
+        ) {
+            return candidate;
+        }
+    }
+
+    return requested;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Extraction                                                                */
+/* ------------------------------------------------------------------------- */
+
+function safeOutputPath(
+    root,
+    repositoryRelativePath
+) {
+    const pieces =
+        repositoryRelativePath
+            .split('/')
+            .filter(Boolean);
+
+    for (
+        const piece of pieces
+    ) {
+        if (
+            piece === '.' ||
+            piece === '..' ||
+            piece.includes('\0')
+        ) {
+            throw new Error(
+                `Unsafe repository path: ${repositoryRelativePath}`
+            );
+        }
+    }
+
+    const result =
+        path.resolve(
+            root,
+            ...pieces
+        );
+
+    const rootResolved =
+        path.resolve(root);
+
+    if (
+        result !== rootResolved &&
+        !result.startsWith(
+            rootResolved +
+                path.sep
+        )
+    ) {
+        throw new Error(
+            `Unsafe extraction path: ${repositoryRelativePath}`
+        );
+    }
+
+    return result;
+}
+
+async function extractPath(
+    repo,
+    repositoryPath,
+    outputDir
+) {
+    repositoryPath =
+        resolveRepositoryPath(
+            repo,
+            repositoryPath
+        );
+
+    const root =
+        repo.nodes.get(
+            repositoryPath
+        );
+
+    if (!root) {
+        throw new Error(
+            `Path does not exist at selected revision: ${repositoryPath}`
+        );
+    }
+
+    await fsp.mkdir(
+        outputDir,
+        {
+            recursive: true
+        }
+    );
+
+    /*
+     * Single file.
+     */
+    if (
+        root.kind === 'file'
+    ) {
+        const destination =
+            path.join(
+                outputDir,
+                baseName(
+                    repositoryPath
+                )
+            );
+
+        await repo.blobStore.copyTo(
+            root.blob,
+            destination
+        );
+
+        return repositoryPath;
+    }
+
+    /*
+     * Directory.
+     */
+    for (
+        const [
+            p,
+            node
+        ] of repo.nodes
+    ) {
+        if (
+            p === repositoryPath ||
+            !isDescendantOrSelf(
+                p,
+                repositoryPath
+            )
+        ) {
+            continue;
+        }
+
+        const relative =
+            relativeRepoPath(
+                p,
+                repositoryPath
+            );
+
+        const destination =
+            safeOutputPath(
+                outputDir,
+                relative
+            );
+
+        if (
+            node.kind === 'dir'
+        ) {
+            await fsp.mkdir(
+                destination,
+                {
+                    recursive: true
+                }
+            );
+        }
+    }
+
+    /*
+     * Files.
+     */
+    for (
+        const [
+            p,
+            blob
+        ] of repo.files
+    ) {
+        if (
+            !isDescendantOrSelf(
+                p,
+                repositoryPath
+            )
+        ) {
+            continue;
+        }
+
+        const relative =
+            relativeRepoPath(
+                p,
+                repositoryPath
+            );
+
+        if (!relative) {
+            continue;
+        }
+
+        const destination =
+            safeOutputPath(
+                outputDir,
+                relative
+            );
+
+        await fsp.mkdir(
+            path.dirname(
+                destination
+            ),
+            {
+                recursive: true
+            }
+        );
+
+        await repo.blobStore.copyTo(
+            blob,
+            destination
+        );
+    }
+
+    return repositoryPath;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Commands                                                                  */
+/* ------------------------------------------------------------------------- */
+
+async function commandList(
+    dump,
+    options
+) {
+    console.error(
+        `Reading ${dump}...`
+    );
+
+    const result =
+        await replayDump(
+            dump,
+            options
+        );
+
+    console.log(
+        `Revision: ${result.revision}`
+    );
+
+    console.log('');
+    console.log('Branches:');
+
+    const branches =
+        listBranches(
+            result.repo
+        );
+
+    if (
+        branches.length === 0
+    ) {
+        console.log(
+            '  (none)'
+        );
+    } else {
+        for (
+            const branch of branches
+        ) {
+            console.log(
+                `  ${branch}`
+            );
+        }
+    }
+
+    console.log('');
+    console.log('Tags:');
+
+    const tags =
+        listTags(
+            result.repo
+        );
+
+    if (
+        tags.length === 0
+    ) {
+        console.log(
+            '  (none)'
+        );
+    } else {
+        for (
+            const tag of tags
+        ) {
+            console.log(
+                `  ${tag}`
+            );
+        }
+    }
+
+    await fsp.rm(
+        result.tempRoot,
+        {
+            recursive: true,
+            force: true
+        }
+    ).catch(() => {});
+}
+
+async function commandSimpleList(
+    dump,
+    what,
+    options
+) {
+    const result =
+        await replayDump(
+            dump,
+            options
+        );
+
+    const items =
+        what === 'branches'
+            ? listBranches(
+                  result.repo
+              )
+            : listTags(
+                  result.repo
+              );
+
+    for (
+        const item of items
+    ) {
+        console.log(item);
+    }
+
+    await fsp.rm(
+        result.tempRoot,
+        {
+            recursive: true,
+            force: true
+        }
+    ).catch(() => {});
+}
+
+async function commandExtract(
+    dump,
+    repositoryPath,
+    outputDir,
+    options
+) {
+    console.error(
+        `Reading ${dump}...`
+    );
+
+    const result =
+        await replayDump(
+            dump,
+            options
+        );
+
+    const resolved =
+        resolveRepositoryPath(
+            result.repo,
+            repositoryPath
+        );
+
+    console.error(
+        `Revision: ${result.revision}`
+    );
+
+    console.error(
+        `Repository path: ${resolved}`
+    );
+
+    await extractPath(
+        result.repo,
+        resolved,
+        outputDir
+    );
+
+    console.error(
+        `Extracted to: ${path.resolve(
+            outputDir
+        )}`
+    );
+
+    await fsp.rm(
+        result.tempRoot,
+        {
+            recursive: true,
+            force: true
+        }
+    ).catch(() => {});
+}
+
+/* ------------------------------------------------------------------------- */
+/* CLI                                                                       */
+/* ------------------------------------------------------------------------- */
+
+function parseArgs(argv) {
+    if (
+        argv.length === 0
+    ) {
+        usage();
+        return null;
+    }
+
+    const command =
+        argv[0];
+
+    const positional = [];
+
+    const options = {
+        revision: null,
+        progress: false,
+        progressEvery: 100
+    };
+
+    for (
+        let i = 1;
+        i < argv.length;
+        i++
+    ) {
+        const arg =
+            argv[i];
+
+        if (
+            arg === '--revision'
+        ) {
+            if (
+                i + 1 >=
+                argv.length
+            ) {
+                throw new Error(
+                    '--revision requires a number'
+                );
+            }
+
+            options.revision =
+                parseInteger(
+                    argv[++i],
+                    'revision'
+                );
+        } else if (
+            arg === '--progress'
+        ) {
+            options.progress = true;
+        } else if (
+            arg === '--progress-every'
+        ) {
+            if (
+                i + 1 >=
+                argv.length
+            ) {
+                throw new Error(
+                    '--progress-every requires a number'
+                );
+            }
+
+            options.progressEvery =
+                parseInteger(
+                    argv[++i],
+                    'progress-every'
+                ) || 1;
+        } else if (
+            arg === '--help' ||
+            arg === '-h'
+        ) {
+            usage();
+            return null;
+        } else {
+            positional.push(arg);
+        }
+    }
+
+    return {
+        command,
+        positional,
+        options
+    };
+}
+
+/* ------------------------------------------------------------------------- */
+/* Main                                                                      */
+/* ------------------------------------------------------------------------- */
+
+async function main() {
+    const parsed =
+        parseArgs(
+            process.argv.slice(2)
+        );
+
+    if (!parsed) {
+        return;
+    }
+
+    const {
+        command,
+        positional,
+        options
+    } = parsed;
+
+    if (
+        command === 'list'
+    ) {
+        if (
+            positional.length !== 1
+        ) {
+            usage();
+            throw new Error(
+                'list requires <dump>'
+            );
+        }
+
+        await commandList(
+            positional[0],
+            options
+        );
+
+        return;
+    }
+
+    if (
+        command === 'branches' ||
+        command === 'tags'
+    ) {
+        if (
+            positional.length !== 1
+        ) {
+            usage();
+            throw new Error(
+                `${command} requires <dump>`
+            );
+        }
+
+        await commandSimpleList(
+            positional[0],
+            command,
+            options
+        );
+
+        return;
+    }
+
+    if (
+        command === 'extract'
+    ) {
+        if (
+            positional.length !== 3
+        ) {
+            usage();
+
+            throw new Error(
+                'extract requires <dump> <repository-path> <output-dir>'
+            );
+        }
+
+        await commandExtract(
+            positional[0],
+            positional[1],
+            positional[2],
+            options
+        );
+
+        return;
+    }
+
+    usage();
+
+    throw new Error(
+        `Unknown command: ${command}`
+    );
+}
+
+main().catch(error => {
+    die(
+        error && error.stack
+            ? error.stack
+            : String(error)
+    );
+});

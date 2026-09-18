@@ -1,0 +1,893 @@
+let pos = 5;
+
+    const windows = [];
+
+    while (
+        pos < delta.length
+    ) {
+        const state = { pos };
+
+        const sourceOffset =
+            readVarInt(
+                delta,
+                state
+            );
+
+        const sourceLength =
+            readVarInt(
+                delta,
+                state
+            );
+
+        const targetLength =
+            readVarInt(
+                delta,
+                state
+            );
+
+        const instructionLength =
+            readVarInt(
+                delta,
+                state
+            );
+
+        const newDataLength =
+            readVarInt(
+                delta,
+                state
+            );
+
+        pos = state.pos;
+
+        if (
+            sourceOffset +
+                sourceLength >
+            source.length
+        ) {
+            throw new Error(
+                'svndiff source window exceeds source file'
+            );
+        }
+
+        if (
+            pos +
+                instructionLength +
+                newDataLength >
+            delta.length
+        ) {
+            throw new Error(
+                'svndiff window exceeds delta data'
+            );
+        }
+
+        const instructions =
+            delta.subarray(
+                pos,
+                pos +
+                    instructionLength
+            );
+
+        pos += instructionLength;
+
+        const newData =
+            delta.subarray(
+                pos,
+                pos +
+                    newDataLength
+            );
+
+        pos += newDataLength;
+
+        const sourceWindow =
+            source.subarray(
+                sourceOffset,
+                sourceOffset +
+                    sourceLength
+            );
+
+        const target =
+            Buffer.allocUnsafe(
+                targetLength
+            );
+
+        let ip = 0;
+        let np = 0;
+        let tp = 0;
+
+        while (
+            ip <
+            instructions.length
+        ) {
+            const opcode =
+                instructions[ip++];
+
+            let length =
+                opcode & 0x3f;
+
+            if (length === 0) {
+                const s = {
+                    pos: ip
+                };
+
+                length =
+                    readVarInt(
+                        instructions,
+                        s
+                    );
+
+                ip = s.pos;
+            }
+
+            const type =
+                opcode >> 6;
+
+            if (type === 0) {
+                /*
+                 * Copy from source.
+                 */
+                let offset;
+
+                if (
+                    opcode & 0x20
+                ) {
+                    const s = {
+                        pos: ip
+                    };
+
+                    offset =
+                        readVarInt(
+                            instructions,
+                            s
+                        );
+
+                    ip = s.pos;
+                } else {
+                    if (
+                        ip >=
+                        instructions.length
+                    ) {
+                        throw new Error(
+                            'Truncated svndiff source offset'
+                        );
+                    }
+
+                    offset =
+                        instructions[ip++];
+                }
+
+                if (
+                    offset + length >
+                    sourceWindow.length
+                ) {
+                    throw new Error(
+                        'svndiff source copy exceeds source window'
+                    );
+                }
+
+                if (
+                    tp + length >
+                    target.length
+                ) {
+                    throw new Error(
+                        'svndiff target overflow'
+                    );
+                }
+
+                sourceWindow.copy(
+                    target,
+                    tp,
+                    offset,
+                    offset + length
+                );
+
+                tp += length;
+            } else if (type === 1) {
+                /*
+                 * Copy from target.
+                 *
+                 * Overlapping copies are allowed by svndiff.
+                 */
+                let offset;
+
+                if (
+                    opcode & 0x20
+                ) {
+                    const s = {
+                        pos: ip
+                    };
+
+                    offset =
+                        readVarInt(
+                            instructions,
+                            s
+                        );
+
+                    ip = s.pos;
+                } else {
+                    if (
+                        ip >=
+                        instructions.length
+                    ) {
+                        throw new Error(
+                            'Truncated svndiff target offset'
+                        );
+                    }
+
+                    offset =
+                        instructions[ip++];
+                }
+
+                if (
+                    offset >= tp &&
+                    length > 0
+                ) {
+                    throw new Error(
+                        'Invalid svndiff target copy'
+                    );
+                }
+
+                if (
+                    tp + length >
+                    target.length
+                ) {
+                    throw new Error(
+                        'svndiff target overflow'
+                    );
+                }
+
+                for (
+                    let i = 0;
+                    i < length;
+                    i++
+                ) {
+                    target[tp + i] =
+                        target[
+                            offset + i
+                        ];
+                }
+
+                tp += length;
+            } else if (type === 2) {
+                /*
+                 * Insert new data.
+                 */
+                if (
+                    np + length >
+                    newData.length
+                ) {
+                    throw new Error(
+                        'svndiff new-data overflow'
+                    );
+                }
+
+                if (
+                    tp + length >
+                    target.length
+                ) {
+                    throw new Error(
+                        'svndiff target overflow'
+                    );
+                }
+
+                newData.copy(
+                    target,
+                    tp,
+                    np,
+                    np + length
+                );
+
+                np += length;
+                tp += length;
+            } else {
+                throw new Error(
+                    'Invalid svndiff instruction'
+                );
+            }
+        }
+
+        if (
+            tp !== targetLength
+        ) {
+            throw new Error(
+                `svndiff target length mismatch: expected ${targetLength}, got ${tp}`
+            );
+        }
+
+        windows.push(target);
+    }
+
+    return Buffer.concat(
+        windows
+    );
+}
+
+/* ------------------------------------------------------------------------- */
+/* Node processing                                                            */
+/* ------------------------------------------------------------------------- */
+
+async function processNode(
+    reader,
+    repo,
+    revision,
+    headers,
+    contentStart
+) {
+    const nodePath =
+        normalizeRepoPath(
+            headers['Node-path']
+        );
+
+    if (!nodePath) {
+        throw new Error(
+            `Revision ${revision}: Node-path is empty`
+        );
+    }
+
+    const action =
+        headers['Node-action'] ||
+        'change';
+
+    const kind =
+        headers['Node-kind'] ||
+        null;
+
+    const contentLen =
+        contentLength(headers);
+
+    const propLen =
+        headerInteger(
+            headers,
+            'Prop-content-length'
+        );
+
+    const textLen =
+        headerInteger(
+            headers,
+            'Text-content-length'
+        );
+
+    if (
+        contentStart +
+            contentLen >
+        reader.size
+    ) {
+        throw new Error(
+            `Revision ${revision}, ${nodePath}: node content exceeds dump`
+        );
+    }
+
+    /*
+     * Read node content in one piece.
+     *
+     * This is only the content of this node, not the whole dump.
+     */
+    const content =
+        contentLen > 0
+            ? await reader.readAt(
+                  contentStart,
+                  contentLen
+              )
+            : Buffer.alloc(0);
+
+    const copyFromPath =
+        headers['Node-copyfrom-path']
+            ? normalizeRepoPath(
+                  headers[
+                      'Node-copyfrom-path'
+                  ]
+              )
+            : null;
+
+    const copyFromRevision =
+        headers['Node-copyfrom-rev'] != null
+            ? parseInteger(
+                  headers[
+                      'Node-copyfrom-rev'
+                  ],
+                  'Node-copyfrom-rev'
+              )
+            : null;
+
+    /*
+     * ---------------------------------------------------------------
+     * DELETE
+     * ---------------------------------------------------------------
+     */
+    if (action === 'delete') {
+        await repo.deletePath(
+            nodePath,
+            revision
+        );
+
+        return contentLen;
+    }
+
+    /*
+     * ---------------------------------------------------------------
+     * REPLACE
+     * ---------------------------------------------------------------
+     */
+    if (action === 'replace') {
+        await repo.deletePath(
+            nodePath,
+            revision
+        );
+    }
+
+    /*
+     * ---------------------------------------------------------------
+     * ADD WITH COPY
+     * ---------------------------------------------------------------
+     */
+    if (
+        (action === 'add' ||
+            action === 'replace') &&
+        copyFromPath !== null &&
+        copyFromRevision !== null
+    ) {
+        await repo.copyPath(
+            copyFromPath,
+            copyFromRevision,
+            nodePath,
+            revision
+        );
+    } else if (
+        action === 'add' &&
+        kind === 'dir'
+    ) {
+        await repo.setDirectory(
+            nodePath
+        );
+    }
+
+    /*
+     * ---------------------------------------------------------------
+     * DIRECTORY
+     * ---------------------------------------------------------------
+     */
+    if (kind === 'dir') {
+        await repo.setDirectory(
+            nodePath
+        );
+
+        return contentLen;
+    }
+
+    /*
+     * ---------------------------------------------------------------
+     * FILE
+     * ---------------------------------------------------------------
+     */
+
+    let effectiveKind = kind;
+
+    if (!effectiveKind) {
+        const existing =
+            repo.nodes.get(nodePath);
+
+        if (existing) {
+            effectiveKind =
+                existing.kind;
+        }
+    }
+
+    if (effectiveKind !== 'file') {
+        /*
+         * Nothing useful to do.
+         */
+        return contentLen;
+    }
+
+    /*
+     * Property-only modification.
+     */
+    if (textLen === 0) {
+        return contentLen;
+    }
+
+    if (
+        propLen + textLen >
+        content.length
+    ) {
+        throw new Error(
+            `Revision ${revision}, ${nodePath}: property/text lengths exceed Content-length`
+        );
+    }
+
+    /*
+     * The text portion follows the property portion.
+     */
+    const text =
+        content.subarray(
+            propLen,
+            propLen + textLen
+        );
+
+    let fileData;
+
+    if (
+        headers['Text-delta'] ===
+        'true'
+    ) {
+        const existing =
+            repo.nodes.get(
+                nodePath
+            );
+
+        if (
+            !existing ||
+            existing.kind !== 'file' ||
+            !existing.blob
+        ) {
+            throw new Error(
+                `Revision ${revision}, ${nodePath}: text delta has no previous file version`
+            );
+        }
+
+        const source =
+            await repo.blobStore.read(
+                existing.blob
+            );
+
+        fileData =
+            decodeSvndiff(
+                text,
+                source
+            );
+    } else {
+        fileData =
+            Buffer.from(text);
+    }
+
+    const blob =
+        await repo.blobStore.put(
+            fileData
+        );
+
+    await repo.setFile(
+        nodePath,
+        blob,
+        revision
+    );
+
+    return contentLen;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Revision processing                                                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * THIS IS THE IMPORTANT PART.
+ *
+ * A revision record's Content-length does NOT encompass its Node records.
+ *
+ * After reading the revision properties, we continue reading records until
+ * we encounter the next Revision-number.
+ *
+ * Because readHeaders() consumes the next header block, we return that
+ * block as "pending" to the outer parser.
+ */
+
+async function processRevision(
+    reader,
+    repo,
+    revision,
+    revisionHeaders,
+    revisionContentStart,
+    revisionContentLength,
+    options
+) {
+    /*
+     * Revision content normally consists only of revision properties.
+     */
+    if (
+        revisionContentStart +
+            revisionContentLength >
+        reader.size
+    ) {
+        throw new Error(
+            `Revision ${revision}: revision content exceeds dump`
+        );
+    }
+
+    let pos =
+        revisionContentStart +
+        revisionContentLength;
+
+    let pending = null;
+
+    while (pos < reader.size) {
+        const result =
+            await readHeaders(
+                reader,
+                pos
+            );
+
+        if (result.eof) {
+            break;
+        }
+
+        const headers =
+            result.headers;
+
+        const headerStart = pos;
+
+        pos = result.next;
+
+        /*
+         * NEXT REVISION:
+         *
+         * The node records have ended. Leave this record for the outer
+         * parser.
+         */
+        if (
+            headers['Revision-number'] !=
+            null
+        ) {
+            pending = {
+                headers,
+                next: pos,
+                start: headerStart
+            };
+
+            break;
+        }
+
+        /*
+         * Ignore non-node administrative records if any occur.
+         */
+        if (
+            headers['Node-path'] ==
+            null
+        ) {
+            const len =
+                contentLength(headers);
+
+            pos += len;
+            continue;
+        }
+
+        /*
+         * This Node-* record belongs to CURRENT revision.
+         */
+        const nodeContentLen =
+            contentLength(headers);
+
+        await processNode(
+            reader,
+            repo,
+            revision,
+            headers,
+            pos
+        );
+
+        pos += nodeContentLen;
+    }
+
+    repo.revision =
+        revision;
+
+    if (
+        options.progress &&
+        (
+            revision === 0 ||
+            revision %
+                options.progressEvery ===
+                0
+        )
+    ) {
+        console.error(
+            `Processed revision ${revision}`
+        );
+    }
+
+    return pending;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Dump replay                                                               */
+/* ------------------------------------------------------------------------- */
+
+async function replayDump(
+    filename,
+    options
+) {
+    const reader =
+        new RandomReader(
+            filename
+        );
+
+    await reader.open();
+
+    const tempRoot =
+        await fsp.mkdtemp(
+            path.join(
+                os.tmpdir(),
+                'svndump-'
+            )
+        );
+
+    const blobs =
+        new BlobStore(
+            path.join(
+                tempRoot,
+                'blobs'
+            )
+        );
+
+    await blobs.init();
+
+    const repo =
+        new Repository(
+            blobs
+        );
+
+    let pos = 0;
+    let pending = null;
+
+    try {
+        /*
+         * First record is the dump format header.
+         */
+        const first =
+            await readHeaders(
+                reader,
+                pos
+            );
+
+        if (first.eof) {
+            throw new Error(
+                'Empty SVN dump'
+            );
+        }
+
+        pos = first.next;
+
+        /*
+         * Main loop.
+         */
+        while (
+            pos < reader.size ||
+            pending
+        ) {
+            let record;
+
+            if (pending) {
+                record = pending;
+                pending = null;
+                pos = record.next;
+            } else {
+                const result =
+                    await readHeaders(
+                        reader,
+                        pos
+                    );
+
+                if (result.eof) {
+                    break;
+                }
+
+                record = {
+                    headers:
+                        result.headers,
+                    next:
+                        result.next
+                };
+
+                pos = result.next;
+            }
+
+            const headers =
+                record.headers;
+
+            /*
+             * Skip UUID or other global records.
+             */
+            if (
+                headers['Revision-number'] ==
+                null
+            ) {
+                const len =
+                    contentLength(
+                        headers
+                    );
+
+                pos += len;
+                continue;
+            }
+
+            const revision =
+                parseInteger(
+                    headers[
+                        'Revision-number'
+                    ],
+                    'Revision-number'
+                );
+
+            /*
+             * Stop before processing revisions after requested revision.
+             */
+            if (
+                options.revision !=
+                    null &&
+                revision >
+                    options.revision
+            ) {
+                break;
+            }
+
+            const revisionContentLen =
+                contentLength(
+                    headers
+                );
+
+            pending =
+                await processRevision(
+                    reader,
+                    repo,
+                    revision,
+                    headers,
+                    pos,
+                    revisionContentLen,
+                    options
+                );
+
+            /*
+             * If processRevision returned a next Revision-number,
+             * its "next" points after its header. We must reset pos to
+             * the beginning of that header, because the pending record
+             * itself is to be processed by the outer loop.
+             */
+            if (pending) {
+                /*
+                 * We saved "start" in processRevision.
+                 */
+                pos = pending.start;
+            }
+        }
+
+        return {
+            repo,
+            tempRoot,
+            revision:
+                repo.revision
+        };
+    } catch (error) {
+        await reader.close();
+
+        await fsp.rm(
+            tempRoot,
+            {
+                recursive: true,
+                force: true
+            }
+        ).catch(() => {});
+
+        throw error;
+    } finally {
+        await reader.close();
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Repository layout discovery                                                */
+/* ------------------------------------------------------------------------- */
+
+function discoverLayout(repo) {
+    const paths =
+        [...repo.nodes.keys()];
+
+    const branchesRoots =
+        new Set();
+
+    const tagsRoots =
+        new Set();
+
+    for (const p of paths) {
+        const parts =
+            p.split('/');
+
+        for (
+            let i = 0;
+            i < parts.length;
